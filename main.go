@@ -20,6 +20,7 @@ var (
 	date    = ""
 )
 
+// type config holds configuration
 type config struct {
 	stdout   io.Writer
 	stderr   io.Writer
@@ -36,6 +37,8 @@ type config struct {
 	ignore   bool
 	timeout  int
 }
+
+// type system describes (partial) redfish system
 type system struct {
 	PowerState string `json:"PowerState"`
 	Actions    struct {
@@ -46,6 +49,7 @@ type system struct {
 	} `json:"Actions"`
 }
 
+// main function
 func main() {
 	if err := run(os.Args, os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %s\n", err)
@@ -53,6 +57,7 @@ func main() {
 	}
 }
 
+// run parses passed arguments, builds config and runs specified function: get, list or action
 func run(args []string, stdout io.Writer, stderr io.Writer) error {
 	var c config
 	c.stdout = stdout
@@ -100,6 +105,7 @@ func run(args []string, stdout io.Writer, stderr io.Writer) error {
 		return fmt.Errorf("arguments -debug and -quiet cannot be used at the same time")
 	}
 
+	// call requested function
 	switch {
 	case c.get:
 		return get(c)
@@ -127,6 +133,8 @@ func list(c config) error {
 	return nil
 }
 
+// get returns current power state for specified host
+// currently only hosts with single computer system in redfish systems collection are supported
 func get(c config) error {
 	sys, err := getSystem(c)
 	if err != nil {
