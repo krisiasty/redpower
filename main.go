@@ -44,6 +44,7 @@ type system struct {
 	Actions    struct {
 		ComputerSystemReset struct {
 			ResetTypeRedfishAllowableValues []string `json:"ResetType@Redfish.AllowableValues"`
+			RedfishActionInfo               string   `json:"@Redfish.ActionInfo"`
 			Target                          string   `json:"target"`
 		} `json:"#ComputerSystem.Reset"`
 	} `json:"Actions"`
@@ -124,10 +125,30 @@ func list(c config) error {
 	if err != nil {
 		return err
 	}
+	vals := sys.Actions.ComputerSystemReset.ResetTypeRedfishAllowableValues
+	// workaround for old redfish versions
+	if sys.Actions.ComputerSystemReset.RedfishActionInfo != "" {
+		url := fmt.Sprintf("https://%s%s", c.host, sys.Actions.ComputerSystemReset.RedfishActionInfo)
+		b, err := redfishGet(c, url)
+		if err != nil {
+			return err
+		}
+		var ainfo struct {
+			Parameters []struct {
+				AllowableValues []string `json:"AllowableValues"`
+			} `json:"Parameters"`
+		}
+		if err := json.Unmarshal(b, &ainfo); err != nil {
+			return err
+		}
+		if len(ainfo.Parameters) > 0 {
+			vals = ainfo.Parameters[0].AllowableValues
+		}
+	}
 	if !c.quiet {
 		fmt.Fprintf(c.stdout, "host: %s allowed power actions:\n", c.host)
 	}
-	for _, val := range sys.Actions.ComputerSystemReset.ResetTypeRedfishAllowableValues {
+	for _, val := range vals {
 		fmt.Fprintln(c.stdout, val)
 	}
 	return nil
