@@ -1,5 +1,7 @@
 # redpower
-Server power management using Redfish API
+redpower is a tool written in go language for managing server power using Redfish API. It doesn't have any dependencies and does not require installation - just download binary for your operating system from the [releases](https://github.com/krisiasty/redpower/releases) tab and on non-Windows systems change permissions to make it executable (chmod +x *filename*). 
+
+Tested on Dell EMC R640 and R740xd, Intel R1208WF series, Supermicro SYS-6019U-TN4RT
 
 To get current power state:
 ```
