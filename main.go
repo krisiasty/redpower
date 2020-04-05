@@ -27,12 +27,13 @@ type config struct {
 	user     string
 	pass     string
 	insecure bool
+	debug    bool
 	quiet    bool
 	action   string
 	get      bool
 	list     bool
 	printver bool
-	wait     bool
+	ignore   bool
 	timeout  int
 }
 type system struct {
@@ -67,9 +68,10 @@ func run(args []string, stdout io.Writer, stderr io.Writer) error {
 	flags.StringVar(&c.user, "user", "", "BMC username")
 	flags.StringVar(&c.pass, "pass", "", "BMC password")
 	flags.BoolVar(&c.insecure, "insecure", false, "do not verify host certificate")
+	flags.BoolVar(&c.debug, "debug", false, "enable printing of http response body")
 	flags.BoolVar(&c.quiet, "quiet", false, "do not output any messages except errors")
 	flags.BoolVar(&c.printver, "version", false, "print program version and quit")
-	flags.BoolVar(&c.wait, "wait", false, "wait for action to finish")
+	flags.BoolVar(&c.ignore, "ignore", false, "ignore conflicts (like power on the server which is already on)")
 	flags.IntVar(&c.timeout, "timeout", 30, "operation timeout in seconds")
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
@@ -94,6 +96,8 @@ func run(args []string, stdout io.Writer, stderr io.Writer) error {
 		return fmt.Errorf("missing -action, -get or -list argument")
 	case c.list && c.get, c.list && c.action != "", c.get && c.action != "":
 		return fmt.Errorf("arguments -action, -get and -list cannot be used at the same time")
+	case c.quiet && c.debug:
+		return fmt.Errorf("arguments -debug and -quiet cannot be used at the same time")
 	}
 
 	switch {
@@ -135,6 +139,25 @@ func get(c config) error {
 	return nil
 }
 
+// action performs selected action on specified host
+// currently only hosts with single computer system in redfish systems collection are supported
+func action(c config) error {
+	sys, err := getSystem(c)
+	if err != nil {
+		return err
+	}
+	if !c.quiet {
+		fmt.Fprintf(c.stdout, "performing %s action on host %s ...\n", c.action, c.host)
+	}
+	url := fmt.Sprintf("https://%s%s", c.host, sys.Actions.ComputerSystemReset.Target)
+	data := fmt.Sprintf("{\"ResetType\":\"%s\"}", c.action)
+	_, err = redfishPost(c, url, data)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 // getSystem returns (partial) redfish system object for specified host or error
 // currently only hosts with single computer system in redfish systems collection are supported
 func getSystem(c config) (system, error) {
@@ -151,15 +174,6 @@ func getSystem(c config) (system, error) {
 		return system{}, err
 	}
 	return sys, nil
-}
-
-// action performs selected action on specified host
-// currently only hosts with single computer system in redfish systems collection are supported
-func action(c config) error {
-	if !c.quiet {
-		fmt.Fprintf(c.stdout, "performing %s action on host %s ...\n", c.action, c.host)
-	}
-	return nil
 }
 
 // getSystemURL returns URL for redfish computer system or error if 0 or more than 1 system is found in the systems collection
@@ -182,7 +196,7 @@ func getSystemURL(c config) (string, error) {
 	return fmt.Sprintf("https://%s%s", c.host, systems[0]), nil
 }
 
-// redfishGet sends http GET request to specified url then returns received reponse body or error
+// redfishGet sends http GET request to specified url and returns received reponse body or error
 func redfishGet(c config, url string) ([]byte, error) {
 	client := &http.Client{
 		Timeout:   time.Second * time.Duration(c.timeout),
@@ -199,16 +213,22 @@ func redfishGet(c config, url string) ([]byte, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("wrong response status code - expected: 200 (OK), got: %d (%s)", resp.StatusCode, http.StatusText(resp.StatusCode))
-	}
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
+	if resp.StatusCode != http.StatusOK {
+		if c.debug {
+			fmt.Fprintf(c.stderr, "response status code: %d (%s)\n", resp.StatusCode, http.StatusText(resp.StatusCode))
+			fmt.Fprintln(c.stderr, "Response body:")
+			fmt.Fprintf(c.stderr, string(body))
+		}
+		return nil, fmt.Errorf("wrong response status code - expected: 200 (OK), got: %d (%s)", resp.StatusCode, http.StatusText(resp.StatusCode))
+	}
 	return body, nil
 }
 
+// redfishPost sends http POST request with json encoded data to specified url and returns received reponse body or error
 func redfishPost(c config, url string, data string) ([]byte, error) {
 	client := &http.Client{
 		Timeout:   time.Second * time.Duration(c.timeout),
@@ -226,12 +246,26 @@ func redfishPost(c config, url string, data string) ([]byte, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("wrong response status code - expected: 200 (OK), got: %d (%s)", resp.StatusCode, http.StatusText(resp.StatusCode))
-	}
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
+	}
+	if c.ignore && resp.StatusCode == http.StatusConflict {
+		if !c.quiet {
+			fmt.Fprintln(c.stdout, "OK (ignored conflict)")
+		}
+		return body, nil
+	}
+	if (resp.StatusCode != http.StatusOK) && (resp.StatusCode != http.StatusNoContent) {
+		if c.debug {
+			fmt.Fprintf(c.stderr, "response status code: %d (%s)\n", resp.StatusCode, http.StatusText(resp.StatusCode))
+			fmt.Fprintln(c.stderr, "Response body:")
+			fmt.Fprintf(c.stderr, string(body))
+		}
+		return nil, fmt.Errorf("wrong response status code - expected: 200 (OK) or 204 (NoContent), got: %d (%s)", resp.StatusCode, http.StatusText(resp.StatusCode))
+	}
+	if !c.quiet {
+		fmt.Fprintln(c.stdout, "OK")
 	}
 	return body, nil
 }
