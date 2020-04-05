@@ -9,6 +9,7 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -28,10 +29,20 @@ type config struct {
 	insecure bool
 	quiet    bool
 	action   string
+	get      bool
 	list     bool
 	printver bool
 	wait     bool
 	timeout  int
+}
+type system struct {
+	PowerState string `json:"PowerState"`
+	Actions    struct {
+		ComputerSystemReset struct {
+			ResetTypeRedfishAllowableValues []string `json:"ResetType@Redfish.AllowableValues"`
+			Target                          string   `json:"target"`
+		} `json:"#ComputerSystem.Reset"`
+	} `json:"Actions"`
 }
 
 func main() {
@@ -49,6 +60,7 @@ func run(args []string, stdout io.Writer, stderr io.Writer) error {
 	// init and parse flags
 	flags := flag.NewFlagSet(args[0], flag.ExitOnError)
 	flags.SetOutput(stderr)
+	flags.BoolVar(&c.get, "get", false, "get current power state")
 	flags.BoolVar(&c.list, "list", false, "list supported power actions")
 	flags.StringVar(&c.action, "action", "", "power action to perform")
 	flags.StringVar(&c.host, "host", "", "BMC address and optional port (host or host:port)")
@@ -73,53 +85,72 @@ func run(args []string, stdout io.Writer, stderr io.Writer) error {
 		fmt.Fprintf(stdout, "redpower  version: %s (%s) build date: %s\n", version, commit, date)
 		return nil
 	case c.host == "":
-		return fmt.Errorf("missing host argument")
+		return fmt.Errorf("missing -host argument")
 	case c.user == "":
-		return fmt.Errorf("missing user name")
+		return fmt.Errorf("missing -user name")
 	case c.pass == "":
-		return fmt.Errorf("missing password")
-	case c.list == false && c.action == "":
-		return fmt.Errorf("missing action or list argument")
-	case c.list == true && c.action != "":
-		return fmt.Errorf("action and list arguments cannot be used at the same time")
+		return fmt.Errorf("missing -password")
+	case c.action == "" && c.get == false && c.list == false:
+		return fmt.Errorf("missing -action, -get or -list argument")
+	case c.list && c.get, c.list && c.action != "", c.get && c.action != "":
+		return fmt.Errorf("arguments -action, -get and -list cannot be used at the same time")
 	}
 
-	if c.list == true {
+	switch {
+	case c.get:
+		return get(c)
+	case c.list:
 		return list(c)
+	case c.action != "":
+		return action(c)
 	}
-	return action(c)
+	return fmt.Errorf("possible bug. don't know what to do")
 }
 
 // list prints out a list of supported power actions for specified hosts
 // currently only hosts with single computer system in redfish systems collection are supported
 func list(c config) error {
+	sys, err := getSystem(c)
+	if err != nil {
+		return err
+	}
 	if !c.quiet {
-		fmt.Fprintf(c.stdout, "listing available power actions on host %s ...\n", c.host)
+		fmt.Fprintf(c.stdout, "host: %s allowed power actions:\n", c.host)
 	}
-	url, err := getSystemURL(c)
-	if err != nil {
-		return err
-	}
-	fmt.Fprintf(c.stdout, "url: %s\n", url)
-	b, err := redfishGet(c, url)
-	if err != nil {
-		return err
-	}
-	var system struct {
-		Actions struct {
-			ComputerSystemReset struct {
-				ResetTypeRedfishAllowableValues []string `json:"ResetType@Redfish.AllowableValues"`
-				Target                          string   `json:"target"`
-			} `json:"#ComputerSystem.Reset"`
-		} `json:"Actions"`
-	}
-	if err := json.Unmarshal(b, &system); err != nil {
-		return err
-	}
-	for _, a := range system.Actions.ComputerSystemReset.ResetTypeRedfishAllowableValues {
-		fmt.Fprintln(c.stdout, a)
+	for _, val := range sys.Actions.ComputerSystemReset.ResetTypeRedfishAllowableValues {
+		fmt.Fprintln(c.stdout, val)
 	}
 	return nil
+}
+
+func get(c config) error {
+	sys, err := getSystem(c)
+	if err != nil {
+		return err
+	}
+	if !c.quiet {
+		fmt.Fprintf(c.stdout, "host: %s power state: ", c.host)
+	}
+	fmt.Fprintln(c.stdout, sys.PowerState)
+	return nil
+}
+
+// getSystem returns (partial) redfish system object for specified host or error
+// currently only hosts with single computer system in redfish systems collection are supported
+func getSystem(c config) (system, error) {
+	url, err := getSystemURL(c)
+	if err != nil {
+		return system{}, err
+	}
+	b, err := redfishGet(c, url)
+	if err != nil {
+		return system{}, err
+	}
+	var sys system
+	if err := json.Unmarshal(b, &sys); err != nil {
+		return system{}, err
+	}
+	return sys, nil
 }
 
 // action performs selected action on specified host
@@ -163,6 +194,33 @@ func redfishGet(c config, url string) ([]byte, error) {
 	}
 	req.SetBasicAuth(c.user, c.pass)
 	req.Header.Set("Accept", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("wrong response status code - expected: 200 (OK), got: %d (%s)", resp.StatusCode, http.StatusText(resp.StatusCode))
+	}
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	return body, nil
+}
+
+func redfishPost(c config, url string, data string) ([]byte, error) {
+	client := &http.Client{
+		Timeout:   time.Second * time.Duration(c.timeout),
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: c.insecure}},
+	}
+	req, err := http.NewRequest("POST", url, strings.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	req.SetBasicAuth(c.user, c.pass)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
